@@ -1,0 +1,19 @@
+[project]
+name = "run-it-back"
+version = "0.1.0"
+description = ""
+requires-python = ">=3.14"
+dependencies = [
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.4",
+]
+
+[project.scripts]
+rib = "run_it_back.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/run_it_back"]
