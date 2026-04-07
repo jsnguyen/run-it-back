@@ -3,6 +3,7 @@ __version__ = "0.1.0"
 import ast
 from pathlib import Path
 import importlib.util
+import inspect
 import tomllib
 import glob
 
@@ -21,7 +22,7 @@ class RunItBackError(Exception):
     pass
 
 class Stage:
-    def __init__(self, name, config):
+    def __init__(self, name, config={}):
 
         self.name = name
 
@@ -30,7 +31,7 @@ class Stage:
         if self.filepath is not None:
             self.filepath = Path(self.filepath)
         else:
-            self.filepath = Path('steps') / Path(name).with_suffix('.py')
+            self.filepath = Path(name).with_suffix('.py')
 
         self.func_name = config.get("func_name", name)
 
@@ -39,14 +40,16 @@ class Stage:
         self.inputs = None
         self.outputs = None
 
-        self.inputs_config = config.get("inputs", None)
-        self.outputs_config = config.get("outputs", None)
+        self.inputs_config = config.get("inputs", [])
+        self.outputs_config = config.get("outputs", [])
 
         self.inputs_files = [el for el in self.inputs_config if is_file(el)]
         self.outputs_files = [el for el in self.outputs_config if is_file(el)]
 
         self.inputs_type_str = []
         self.outputs_type_str = []
+
+        self.context = config.get("context", {})
 
     def __repr__(self):
         return f"Stage(name={self.name}, run={self.filepath}, func_name={self.func_name}, params={self.params}, path={self.filepath})"
@@ -65,14 +68,24 @@ class Stage:
 
         func = getattr(module, self.func_name)
 
-        if self.inputs is None and self.params is None:
-            res = func()
-        elif self.inputs is None and self.params is not None:
-            res = func(**self.params)
-        elif self.inputs is not None and self.params is None:
-            res = func(*self.inputs)
+        if has_kwarg(func, "context"):
+            if self.inputs is None and self.params is None:
+                res = func(context=self.context)
+            elif self.inputs is None and self.params is not None:
+                res = func(**self.params, context=self.context)
+            elif self.inputs is not None and self.params is None:
+                res = func(*self.inputs, context=self.context)
+            else:
+                res = func(*self.inputs, **self.params, context=self.context)
         else:
-            res = func(*self.inputs, **self.params)
+            if self.inputs is None and self.params is None:
+                res = func()
+            elif self.inputs is None and self.params is not None:
+                res = func(**self.params)
+            elif self.inputs is not None and self.params is None:
+                res = func(*self.inputs)
+            else:
+                res = func(*self.inputs, **self.params)
 
         missing_files = check_files_exist(self.outputs_files)
         if missing_files != []:
@@ -85,13 +98,22 @@ class Pipeline:
 
         self.config = config
 
-        self.context = config["context"] # global dict
+        # context is the global state that gets passed to all stages
+        # use the object context stage to initialize python objects
+        self.context = config["context"] # initialize as config dict
+        self.make_object_context() # this is so that we can also initialize objects in memory, not just simple types from the toml file
 
         self.stages = []
 
-        for key in config["stage"].keys():
-            st = config["stage"][key]
+        for key in config["stages"].keys():
+            st = config["stages"][key] | {"context": self.context} # all stages get the context
             self.stages.append(Stage(key, st))
+
+    def make_object_context(self):
+        # run with the filepath to the context making file
+        # also pass in the existing dict that we have so far, this will be updated
+        context_stage = Stage(Path(self.context["filepath"]).stem, {"filepath": self.context["filepath"], "context": self.context}) # kind of a weird call here, but it works
+        self.context = self.context | context_stage.run_stage() # merge into new contexts, might eventually have to do conflict checking here? right now context_stage just overrides
 
     def run_all(self):
         for i,stage in enumerate(self.stages):
@@ -105,6 +127,10 @@ class Pipeline:
                 else:
                     self.stages[i+1].inputs = (output,)
 
+    # this wont always work, only works if stages are independent of one another
+    def run_stage(self, index):
+        output = self.stages[index].run_stage()
+
     def validate(self):
 
         # string type checking (not the most robust, but it works well for simple cases and is a good start)
@@ -115,14 +141,17 @@ class Pipeline:
 
             node = ast_get_function_by_name(tree, stage.func_name)
 
-            for arg in node.args.args:
+            n_defaults = len(node.args.defaults)
+            for arg in node.args.args[:len(node.args.args)-n_defaults]:
                 stage.inputs_type_str.append(ast.unparse(arg.annotation))
 
-            if isinstance(node.returns, ast.Tuple):
-                for ret in node.returns.elts:
-                    stage.outputs_type_str.append(ast.unparse(ret))
-            else:
-                stage.outputs_type_str.append(ast.unparse(node.returns))
+            # return can be tuple, single type, or None
+            if getattr(node, 'returns', None) is not None:
+                rtypes = get_output_type_strings(node)
+                if rtypes == ['None']:
+                    stage.outputs_type_str = []
+                else:
+                    stage.outputs_type_str = rtypes
 
             print(stage.func_name)
             print('input  ->', stage.inputs_type_str)
@@ -203,11 +232,20 @@ def get_number_of_input_args(node):
     return n_required_args
 
 def get_number_of_output_args(node):
-    n_outputs = 1 # always at least 1 for None return
+    n_outputs = 0 # always at least 1 for None return
     for n in ast.walk(node):
+
+        # skip nested functions
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            break
+
         if isinstance(n, ast.Return):
-            if isinstance(n.value, ast.Tuple):
+            if n.value is None:
+                n_outputs = 0
+            elif isinstance(n.value, ast.Tuple):
                 n_outputs = len(n.value.elts)
+            else:
+                n_outputs = 1
 
     return n_outputs
 
@@ -232,6 +270,34 @@ def check_files_exist(patterns):
                 missing.append(pat)
 
     return missing
+
+def has_kwarg(func, kwarg_name: str) -> bool:
+    sig = inspect.signature(func)
+    p = sig.parameters.get(kwarg_name)
+    if p is None:
+        return False
+    return p.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )
+
+def get_output_type_strings(node: ast.FunctionDef) -> list[str]:
+    r = node.returns
+
+    # no annotation => implicitly None
+    if r is None:
+        return ["None"]
+
+    # explicit "-> None"
+    if isinstance(r, ast.Constant) and r.value is None:
+        return ["None"]
+
+    # support "-> (A, B)" style if you use it
+    if isinstance(r, ast.Tuple):
+        return [ast.unparse(el) for el in r.elts]
+
+    # single annotated output
+    return [ast.unparse(r)]
 
 def print_dag(pipeline):
     """Print an ASCII DAG of the pipeline."""

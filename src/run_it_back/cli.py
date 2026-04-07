@@ -9,8 +9,7 @@ def main():
     )
 
     parser.add_argument(
-        "--file", "-f",
-        default="pipeline.toml",
+        "file",
         help="path to pipeline file (default: pipeline.toml)",
     )
 
@@ -20,25 +19,23 @@ def main():
         help="skip validation of pipeline file and steps (default: False)",
     )
 
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    run_parser = subparsers.add_parser("run", help="run the pipeline")
-    run_parser.add_argument("step", nargs="?", help="run a single step")
+    parser.add_argument("command", choices=["run", "validate", "dag"])
+    parser.add_argument("stage", nargs="?", type=int, help="Optional stage index (0-based)")
 
     args = parser.parse_args()
     pipeline_file = Path(args.file)
 
+    pipeline = load_pipeline(pipeline_file)
 
-    if args.command == "run":
-        pipeline = load_pipeline(pipeline_file)
+    if not args.skip_validation:
+        pipeline.validate()
 
-        if not args.skip_validation:
-            pipeline.validate()
-
+    if args.command == "run" and args.stage is None:
         pipeline.run_all()
+    elif args.command == "run" and args.stage is not None:
+        pipeline.run_stage(args.stage)
 
     print_dag(pipeline)
-
 
 if __name__ == "__main__":
     main()

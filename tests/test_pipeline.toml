@@ -4,19 +4,19 @@ name = "test pipeline"
 [context]
 target = "whee"
 
-[stage.load_data]
+[stages.load_data]
 filepath = "stages/load_data.py"
 params = { name = "test"}
 inputs = []
 outputs = ["data", "const"]
 
-[stage.calibrate_data]
+[stages.calibrate_data]
 filepath = "stages/calibrate_data.py"
 func_name = "alt_calibrate"
 inputs = ["data", "const"]
 outputs = ["data_calibrated", "number"]
 
-[stage.analyze_data]
+[stages.analyze_data]
 filepath = "stages/analyze_data.py"
 func_name = "analyze_data"
 inputs = ["data_calibrated", "number"]
