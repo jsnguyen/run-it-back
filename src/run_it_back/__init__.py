@@ -122,10 +122,11 @@ class Pipeline:
             output = stage.run_stage()
 
             if i < len(self.stages) - 1:
-                if isinstance(output, tuple):
-                    self.stages[i+1].inputs = output
-                else:
-                    self.stages[i+1].inputs = (output,)
+                if output is not None:
+                    if isinstance(output, tuple):
+                        self.stages[i+1].inputs = output
+                    else:
+                        self.stages[i+1].inputs = (output,)
 
     # this wont always work, only works if stages are independent of one another
     def run_stage(self, index):
@@ -202,7 +203,6 @@ class Pipeline:
             if n_required_args != len(stage.inputs_config):
                 raise RunItBackError(f"Number of function inputs from stage '{stage.name}' ({n_required_args}) does not match number of inputs in config ({len(stage.inputs_config)})!")
 
-
 def get_number_of_input_args(node):
     if node.args.posonlyargs != []:
         raise ValueError("RIB does not support stages with positional-only args yet!")
@@ -221,7 +221,7 @@ def get_number_of_input_args(node):
 
     for arg in node.args.args:
         if arg.annotation is None:
-            raise RunItBackError(f"RIB requires all stage function arguments to be annotated with types, missing annotation for argument '{arg.arg}' in function '{self.func_name}' in stage '{self.filepath}'")
+            raise RunItBackError(f"RIB requires all stage function arguments to be annotated with types, missing annotation for argument '{arg.arg}' in function '{node.name}'")
 
     # can make this more robust eventually
 

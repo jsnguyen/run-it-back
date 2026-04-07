@@ -8,6 +8,8 @@ def main():
         description="run-it-back: reproducible data analysis pipelines",
     )
 
+    parser.add_argument("command", choices=["run", "validate", "dag"])
+
     parser.add_argument(
         "file",
         help="path to pipeline file (default: pipeline.toml)",
@@ -19,7 +21,6 @@ def main():
         help="skip validation of pipeline file and steps (default: False)",
     )
 
-    parser.add_argument("command", choices=["run", "validate", "dag"])
     parser.add_argument("stage", nargs="?", type=int, help="Optional stage index (0-based)")
 
     args = parser.parse_args()

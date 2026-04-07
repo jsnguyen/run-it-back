@@ -13,6 +13,14 @@ All functions need to have type annotations for the inputs and outputs. The outp
 
 Currently a work in progress!
 
+## Command Line Interface
+
+This package provides a CLI for running pipelines which are defined by .toml files. The .toml file contains the definition of the pipeline, including the stages, their inputs and outputs, and the context.
+
+```bash
+rib run pipeline.toml
+```
+
 ## Definitions
 
 - context: A dictionary containing global state that is passed to all stages in the pipeline. This is initialized in the beginning and has a special setup in the .toml file.
@@ -48,3 +56,8 @@ inputs = ["data_calibrated", "number"]
 outputs = ["figs/calibrated_data_heatmap.png"] # files are autodetected by the .
 
 ```
+
+## TODO
+
+- hashing of output files to check if they have been modified or changed
+- better system for type checking? maybe use inspect or don't rely so much on the ast
