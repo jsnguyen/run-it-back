@@ -51,7 +51,7 @@ outputs = ["data_calibrated", "number"]
 
 [stages.analyze_data]
 filepath = "stages/analyze_data.py"
-func_name = "analyze_data"
+func_name = "analyze_data" # this is unecessary since the function name is the same as the stage name
 inputs = ["data_calibrated", "number"]
 outputs = ["figs/calibrated_data_heatmap.png"] # files are autodetected by the .
 

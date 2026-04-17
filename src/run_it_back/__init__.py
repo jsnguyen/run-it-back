@@ -1,6 +1,7 @@
 __version__ = "0.1.0"
 
 import ast
+import time
 from pathlib import Path
 import importlib.util
 import inspect
@@ -11,12 +12,6 @@ SAVE_FUNC_NAMES = ("save", "savefig", "to_csv", "to_parquet", "to_hdf",
                    "to_excel", "to_json", "to_pickle", "to_feather",
                    "writeto", "write_to", "write", "savetxt", "savez",
                    "savez_compressed", "imwrite", "dump")
-
-def load_pipeline(filepath: Path):
-    with open(filepath, "rb") as f:
-        config = tomllib.load(f)
-
-    return Pipeline(config)  # for now, just return the dict
 
 class RunItBackError(Exception):
     pass
@@ -94,20 +89,32 @@ class Stage:
         return res
 
 class Pipeline:
-    def __init__(self, config):
 
-        self.config = config
+    def __init__(self, filepath, log=None):
+
+        with open(filepath, "rb") as f:
+            self.config = tomllib.load(f)
 
         # context is the global state that gets passed to all stages
         # use the object context stage to initialize python objects
-        self.context = config["context"] # initialize as config dict
+        self.context = self.config["context"] # initialize as config dict
         self.make_object_context() # this is so that we can also initialize objects in memory, not just simple types from the toml file
+
+        if log is not None:
+            self.emit = Emitter(log=log)
+            self.context["log"] = log
 
         self.stages = []
 
-        for key in config["stages"].keys():
-            st = config["stages"][key] | {"context": self.context} # all stages get the context
+        for key in self.config["stages"].keys():
+            st = self.config["stages"][key] | {"context": self.context} # all stages get the context
             self.stages.append(Stage(key, st))
+
+    def get_stage(self, name):
+        for stage in self.stages:
+            if stage.name == name:
+                return stage
+        raise ValueError(f"Stage with name '{name}' not found in pipeline!")
 
     def make_object_context(self):
         # run with the filepath to the context making file
@@ -115,18 +122,42 @@ class Pipeline:
         context_stage = Stage(Path(self.context["filepath"]).stem, {"filepath": self.context["filepath"], "context": self.context}) # kind of a weird call here, but it works
         self.context = self.context | context_stage.run_stage() # merge into new contexts, might eventually have to do conflict checking here? right now context_stage just overrides
 
-    def run_all(self):
-        for i,stage in enumerate(self.stages):
+    def run_all(self, start_stage_index=0, time_stages=False):
 
-            print(f"Running stage: {stage.name}")
+        self.emit("Starting pipeline execution...")
+        self.emit(f"Running {len(self.stages)-start_stage_index} stages...")
+
+        if start_stage_index > 0:
+            self.emit(f"Starting pipeline from stage index {start_stage_index} -> {self.stages[start_stage_index].name}")
+
+        if time_stages:
+            overall_start_time = time.time()
+
+        for i,stage in enumerate(self.stages[start_stage_index:]):
+
+            stage_index = i+start_stage_index
+
+            if time_stages:
+                start_time = time.time()
+            self.emit(f"Running stage -> {stage.name}")
             output = stage.run_stage()
 
             if i < len(self.stages) - 1:
                 if output is not None:
                     if isinstance(output, tuple):
-                        self.stages[i+1].inputs = output
+                        self.stages[stage_index+1].inputs = output
                     else:
-                        self.stages[i+1].inputs = (output,)
+                        self.stages[stage_index+1].inputs = (output,)
+
+            if time_stages:
+                elapsed = time.time() - start_time
+                self.emit(f'Stage {stage_index} completed in {format_duration(elapsed)}')
+
+        if time_stages:
+            overall_elapsed = time.time() - overall_start_time
+            self.emit(f'Pipeline completed in {format_duration(overall_elapsed)}')
+
+        self.emit("Done!")
 
     # this wont always work, only works if stages are independent of one another
     def run_stage(self, index):
@@ -135,7 +166,7 @@ class Pipeline:
     def validate(self):
 
         # string type checking (not the most robust, but it works well for simple cases and is a good start)
-        for stage in self.stages:
+        for i,stage in enumerate(self.stages):
 
             contents = stage.filepath.read_text()
             tree = ast.parse(contents)
@@ -154,11 +185,15 @@ class Pipeline:
                 else:
                     stage.outputs_type_str = rtypes
 
-            print(stage.func_name)
-            print('input  ->', stage.inputs_type_str)
-            print('output ->', stage.outputs_type_str)
-            print()
+            self.emit(f'-- Stage {i} --')
+            self.emit(f'name   -> {stage.name}')
+            self.emit(f'func   -> {stage.func_name}')
+            self.emit(f'params -> {stage.params}')
+            self.emit(f'input  -> {stage.inputs_type_str}')
+            self.emit(f'output -> {stage.outputs_type_str}')
+            self.emit()
 
+        '''
         for i in range(len(self.stages)-1):
             curr_stage = self.stages[i]
             next_stage = self.stages[i+1]
@@ -202,6 +237,7 @@ class Pipeline:
 
             if n_required_args != len(stage.inputs_config):
                 raise RunItBackError(f"Number of function inputs from stage '{stage.name}' ({n_required_args}) does not match number of inputs in config ({len(stage.inputs_config)})!")
+        '''
 
 def get_number_of_input_args(node):
     if node.args.posonlyargs != []:
@@ -299,79 +335,34 @@ def get_output_type_strings(node: ast.FunctionDef) -> list[str]:
     # single annotated output
     return [ast.unparse(r)]
 
-def print_dag(pipeline):
-    """Print an ASCII DAG of the pipeline."""
-    stages = pipeline.stages
+def format_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.2f}s"
 
-    # build adjacency
-    all_outputs = {}
-    for stage in stages:
-        for out in stage.outputs_config:
-            all_outputs[out] = stage.name
+    minutes, sec = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{int(minutes)}m {sec:.2f}s"
 
-    edges = {}
-    parents = {}
-    for stage in stages:
-        edges[stage.name] = []
-        parents[stage.name] = []
+    hours, minutes = divmod(minutes, 60)
+    return f"{int(hours)}h {int(minutes)}m {sec:.2f}s"
 
-    for stage in stages:
-        for inp in stage.inputs_config:
-            if inp in all_outputs:
-                parent = all_outputs[inp]
-                if parent != stage.name:
-                    edges[parent].append(stage.name)
-                    parents[stage.name].append(parent)
+class Emitter:
+    def __init__(self, log=None, echo: bool = True):
+        self.log = log
+        self.echo = echo
 
-    # find roots
-    roots = [s.name for s in stages if not parents[s.name]]
+    def __call__(self, msg: str = '', level: str = "info") -> None:
+        if self.echo:
+            print(msg)
+        if self.log is not None:
+            log_fn = getattr(self.log, level, self.log.info)
+            log_fn(msg)
 
-    # BFS to assign depths
-    depth = {}
-    queue = [(r, 0) for r in roots]
-    while queue:
-        name, d = queue.pop(0)
-        if name in depth:
-            depth[name] = max(depth[name], d)
-        else:
-            depth[name] = d
-        for child in edges[name]:
-            queue.append((child, d + 1))
+    def info(self, msg: str) -> None:
+        self(msg, "info")
 
-    # group by depth
-    layers = {}
-    for name, d in depth.items():
-        layers.setdefault(d, []).append(name)
+    def warning(self, msg: str) -> None:
+        self(msg, "warning")
 
-    # print
-    for d in sorted(layers.keys()):
-        for name in layers[d]:
-            indent = "    " * d
-            stage = next(s for s in stages if s.name == name)
-
-            mem_in = [i for i in stage.inputs_config if not is_file(i)]
-            mem_out = [o for o in stage.outputs_config if not is_file(o)]
-            file_out = [o for o in stage.outputs_config if is_file(o)]
-
-            if d == 0:
-                prefix = "[*] "
-            else:
-                prefix = "+-- "
-
-            line = f"{indent}{prefix}{name}"
-
-            tags = []
-            if mem_in:
-                tags.append(f"in: {', '.join(mem_in)}")
-            if mem_out:
-                tags.append(f"out: {', '.join(mem_out)}")
-            if file_out:
-                tags.append(f"saves: {', '.join(file_out)}")
-
-            if tags:
-                line += f"  ({' | '.join(tags)})"
-
-            print(line)
-
-            if edges[name]:
-                print(f"{indent}    |")
+    def error(self, msg: str) -> None:
+        self(msg, "error")
