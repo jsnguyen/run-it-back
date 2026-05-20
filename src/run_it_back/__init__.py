@@ -1,12 +1,18 @@
 __version__ = "0.1.0"
 
 import ast
+import sys
 import time
 from pathlib import Path
 import importlib.util
 import inspect
 import tomllib
 import glob
+from datetime import datetime
+import secrets
+from shutil import copy2
+import logging
+import json
 
 SAVE_FUNC_NAMES = ("save", "savefig", "to_csv", "to_parquet", "to_hdf",
                    "to_excel", "to_json", "to_pickle", "to_feather",
@@ -17,11 +23,13 @@ class RunItBackError(Exception):
     pass
 
 class Stage:
-    def __init__(self, name, config={}):
+    def __init__(self, name, config, pipeline_output_path, aux_stages=[]):
 
         self.name = name
 
         self.filepath = config.get("filepath", None)
+
+        self.pipeline_output_path = pipeline_output_path
 
         if self.filepath is not None:
             self.filepath = Path(self.filepath)
@@ -46,16 +54,15 @@ class Stage:
 
         self.context = config.get("context", {})
 
-    def __repr__(self):
-        return f"Stage(name={self.name}, run={self.filepath}, func_name={self.func_name}, params={self.params}, path={self.filepath})"
+        self.aux_stages = aux_stages
 
     def run_stage(self):
         if self.func_name is None:
             raise ValueError(f"Stage {self.name} is missing 'func_name' in config")
 
-        missing_files = check_files_exist(self.inputs_files)
+        missing_files = check_files_exist(self.inputs_files, self.pipeline_output_path)
         if missing_files != []:
-            raise RunItBackError(f"Missing input files! {missing_files}")
+            raise RunItBackError(f"Missing input files! {missing_files} for stage {self.name}")
 
         spec = importlib.util.spec_from_file_location(self.name, self.filepath)
         module = importlib.util.module_from_spec(spec)
@@ -82,33 +89,189 @@ class Stage:
             else:
                 res = func(*self.inputs, **self.params)
 
-        missing_files = check_files_exist(self.outputs_files)
+        missing_files = check_files_exist(self.outputs_files, self.pipeline_output_path)
         if missing_files != []:
             raise RunItBackError(f"Missing output files! {missing_files}")
+
+        for aux_stage in self.aux_stages:
+            aux_stage.run_stage()
 
         return res
 
 class Pipeline:
+    '''
+    Required entries:
 
-    def __init__(self, filepath, log=None):
+    - [pipeline]
+        - name
+        - pipeline_output_path
+        - stage_path
 
-        with open(filepath, "rb") as f:
+    - [context]
+        - filepath (for make_context stage)
+
+    - relative paths output to the pipeline output folder, prefer relative paths
+    - absolute paths should be used for things that are effectively constant in the pipeline
+
+    '''
+
+    def __init__(self, filepath, skip_validation=False):
+        print_run_it_back()
+        print("="*64)
+        print()
+
+        self.filepath = Path(filepath).resolve()
+        with open(self.filepath, "rb") as f:
             self.config = tomllib.load(f)
 
         # context is the global state that gets passed to all stages
         # use the object context stage to initialize python objects
-        self.context = self.config["context"] # initialize as config dict
-        self.make_object_context() # this is so that we can also initialize objects in memory, not just simple types from the toml file
+        self.context             = self.config["context"] # initialize as config dict
+        self.pipeline_parameters = self.config["pipeline"] # these are the pipeline specific parameters
+        self.config_dir = self.filepath.parent.resolve()
+        self.context["config_dir"] = self.config_dir
 
-        if log is not None:
-            self.emit = Emitter(log=log)
-            self.context["log"] = log
+        self.generate_run_id()
 
+        self.configure_pipeline_output()
+        copy2(self.filepath, self.pipeline_output_path / self.filepath.name) # copy the pipeline file to the output directory for better record keeping
+
+        self.write_runtime_json() # all runtime info needed is initialized up to here
+
+        self.emit = self.init_logger()
+        self.emit(f"-> Initializing {self.pipeline_parameters.get("name")}")
+        self.emit(f"-> Pipeline output path: {self.pipeline_output_path}")
+
+        self.configure_stages_path()
+
+        self.make_context_stage()
+
+        self.parse_stages()
+
+        if not skip_validation:
+            self.validate()
+
+    def generate_run_id(self):
+        self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(2) # add run id for better tracking of different runs, can be used in context if desired
+
+    def configure_pipeline_output(self):
+        '''
+        Turns the output paths into absolute paths, also makes it a unique path
+        '''
+
+        self.pipeline_output_path = self.pipeline_parameters.get("pipeline_output_path")
+
+        if not self.pipeline_output_path:
+            raise ValueError("pipeline_output_path must be specified in the pipeline config under [pipeline]!")
+
+        self.pipeline_output_prefix = self.pipeline_parameters.get("pipeline_output_prefix", self.pipeline_parameters.get("name").lower().replace(" ", "_"))
+
+        if not self.pipeline_output_prefix:
+            raise ValueError("pipeline_output_prefix must be specified in the pipeline config under [pipeline]!")
+
+        base_path = (self.config_dir / self.pipeline_output_path).resolve()
+        if self.pipeline_parameters["use_unique_path"]:
+            self.pipeline_output_path = (base_path / f"{self.pipeline_output_prefix}_{self.run_id}")
+        else:
+            self.pipeline_output_path = (base_path / f"{self.pipeline_output_prefix}")
+
+        self.pipeline_output_path.mkdir(exist_ok=True, parents=True)
+        self.context["pipeline_output_path"] = self.pipeline_output_path
+
+    def write_runtime_json(self):
+        runtime = {
+            "run_id":     self.run_id,
+            "config_dir": str(self.config_dir),
+        }
+
+        with open(self.pipeline_output_path / "runtime.json", "w") as f:
+            json.dump(runtime, f, indent=2)
+
+    def configure_stages_path(self):
+        stages_path = self.pipeline_parameters.get("stages_path")
+        if stages_path:
+            sys.path.insert(0, str((self.config_dir / stages_path).resolve())) # so we can reference/import functions within stages within other stages
+
+    def make_context_stage(self):
+        # this is kind of hacky, but this is correct for the context stage
+        config = dict(self.context)
+        config["filepath"] = self.resolve_stage_filepath(config["filepath"])
+        config["context"] = self.context
+
+        make_context_stage = Stage("make_context", config, self.pipeline_output_path)
+        object_context = make_context_stage.run_stage()
+        self.context.update(object_context)
+
+    def parse_stages(self):
         self.stages = []
-
         for key in self.config["stages"].keys():
-            st = self.config["stages"][key] | {"context": self.context} # all stages get the context
-            self.stages.append(Stage(key, st))
+            stage_config = self.config["stages"][key]
+            stage_config["context"] = self.context # all stages get the context
+            stage_config["filepath"] = self.resolve_stage_filepath(stage_config["filepath"])
+
+            aux_stages = []
+            for k in stage_config.get("aux_stages", []):
+                aux_stage_config = self.config["aux_stages"][k]
+                aux_stage_config["context"] = self.context # add context to aux stages as well
+                aux_stage_config["filepath"] = self.resolve_stage_filepath(aux_stage_config["filepath"])
+                aux_stages.append(Stage(k, aux_stage_config, self.pipeline_output_path))
+
+            self.stages.append(Stage(key, stage_config, self.pipeline_output_path, aux_stages=aux_stages))
+
+    def load_runtime_json(self, runtime_json_path):
+        with open(runtime_json_path, "r") as f:
+            runtime = json.load(f)
+        return runtime
+
+    @classmethod
+    def load_run(cls, run_path, skip_validation=True, echo=False):
+        obj = cls.__new__(cls)  # allocate object without calling __init__
+        obj._load_run(run_path, skip_validation=skip_validation, echo=echo)
+        return obj
+
+    def _load_run(self, run_path, skip_validation=True, echo=False):
+        run_path = Path(run_path).resolve()
+
+        runtime = self.load_runtime_json(run_path / "runtime.json")
+
+        tomls = list(run_path.glob("*.toml"))
+        if len(tomls) != 1:
+            raise RunItBackError(f"Expected exactly one .toml file in {run_path}, found {len(tomls)}")
+
+        self.filepath = tomls[0]
+        with open(self.filepath, "rb") as f:
+            self.config = tomllib.load(f)
+
+        self.context               = self.config["context"]
+        self.pipeline_parameters   = self.config["pipeline"]
+        self.config_dir            = Path(runtime["config_dir"])
+        self.context["config_dir"] = self.config_dir
+
+        self.run_id                 = runtime["run_id"]
+
+        # this replaces self.configure_pipeline_output() since we need the run_id to make the output path
+        self.pipeline_output_prefix = self.pipeline_parameters.get("pipeline_output_prefix", self.pipeline_parameters.get("name").lower().replace(" ", "_"))
+        self.pipeline_output_path = run_path
+        self.context["pipeline_output_path"] = self.pipeline_output_path
+
+        self.emit = Emitter(log=None, echo=echo)
+
+        self.configure_stages_path()
+
+        self.make_context_stage()
+
+        self.parse_stages()
+
+        if not skip_validation:
+            self.validate()
+
+    def init_logger(self):
+        logging.basicConfig(filename=self.pipeline_output_path / self.filepath.with_suffix('.log'),
+                            format='%(asctime)s %(levelname)s: %(message)s',
+                            filemode='w')
+        log = logging.getLogger()
+        log.setLevel(logging.INFO)
+        return Emitter(log=log)
 
     def get_stage(self, name):
         for stage in self.stages:
@@ -116,33 +279,42 @@ class Pipeline:
                 return stage
         raise ValueError(f"Stage with name '{name}' not found in pipeline!")
 
-    def make_object_context(self):
-        # run with the filepath to the context making file
-        # also pass in the existing dict that we have so far, this will be updated
-        context_stage = Stage(Path(self.context["filepath"]).stem, {"filepath": self.context["filepath"], "context": self.context}) # kind of a weird call here, but it works
-        self.context = self.context | context_stage.run_stage() # merge into new contexts, might eventually have to do conflict checking here? right now context_stage just overrides
+    def run(self, start_stage_index=0, end_stage_index=None, time_stages=False):
 
-    def run_all(self, start_stage_index=0, time_stages=False):
+        if end_stage_index is not None and end_stage_index <= start_stage_index:
+            raise ValueError(f"end_stage_index ({end_stage_index}) must be greater than start_stage_index ({start_stage_index})")
 
-        self.emit("Starting pipeline execution...")
-        self.emit(f"Running {len(self.stages)-start_stage_index} stages...")
+        selected = self.stages[start_stage_index:end_stage_index]
+
+        self.emit(f"-> Running {len(selected)} stages...")
+
+        for i,stage in enumerate(selected):
+            self.print_stage(stage, i+start_stage_index)
 
         if start_stage_index > 0:
-            self.emit(f"Starting pipeline from stage index {start_stage_index} -> {self.stages[start_stage_index].name}")
+            self.emit(f"-> Starting pipeline from: stage {start_stage_index+1} -> {self.stages[start_stage_index].name}")
+
+        if end_stage_index is not None:
+            self.emit(f"-> Stopping pipeline at:   stage {end_stage_index} -> {self.stages[end_stage_index-1].name}")
 
         if time_stages:
             overall_start_time = time.time()
 
-        for i,stage in enumerate(self.stages[start_stage_index:]):
+        for i,stage in enumerate(selected):
 
             stage_index = i+start_stage_index
 
             if time_stages:
                 start_time = time.time()
-            self.emit(f"Running stage -> {stage.name}")
+
+            self.emit(f"-> Running stage: {stage.name}")
+            self.emit()
+            self.emit("="*64)
+            self.emit()
+
             output = stage.run_stage()
 
-            if i < len(self.stages) - 1:
+            if stage_index < len(self.stages) - 1:
                 if output is not None:
                     if isinstance(output, tuple):
                         self.stages[stage_index+1].inputs = output
@@ -151,17 +323,52 @@ class Pipeline:
 
             if time_stages:
                 elapsed = time.time() - start_time
-                self.emit(f'Stage {stage_index} completed in {format_duration(elapsed)}')
+                self.emit(f'-> Stage {stage_index+1} completed in {format_duration(elapsed)}')
 
         if time_stages:
             overall_elapsed = time.time() - overall_start_time
-            self.emit(f'Pipeline completed in {format_duration(overall_elapsed)}')
+            self.emit(f'-> Pipeline completed in {format_duration(overall_elapsed)}')
 
-        self.emit("Done!")
+        self.emit("-> Done!")
 
     # this wont always work, only works if stages are independent of one another
     def run_stage(self, index):
-        output = self.stages[index].run_stage()
+        return self.stages[index].run_stage()
+
+    def print_stage(self, stage, index):
+        input_files_str  = "\n            ".join(stage.inputs_files)
+        output_files_str = "\n            ".join(stage.outputs_files)
+        self.emit(f"""
+[Stage {index+1:02d}]
+name    : {stage.name}
+func    : {stage.func_name}
+params  : {stage.params}
+inputs
+    types  : {stage.inputs_type_str}
+    files  : {input_files_str}
+outputs
+    types  : {stage.outputs_type_str}
+    files  : {output_files_str}
+aux stages : {[aux_stage.name for aux_stage in stage.aux_stages]}
+""")
+
+        """
+        self.emit(f'-- Stage {index+1:02d} --')
+        self.emit(f'name   -> {stage.name}')
+        self.emit(f'func   -> {stage.func_name}')
+        self.emit(f'params -> {stage.params}')
+        self.emit(f'input  types -> {stage.inputs_type_str}')
+        self.emit(f'output types -> {stage.outputs_type_str}')
+        self.emit(f'input  files -> {stage.inputs_files}')
+        self.emit(f'output files -> {stage.outputs_files}')
+        self.emit()
+        """
+
+    def resolve_stage_filepath(self, filepath):
+        filepath = Path(filepath)
+        if filepath.is_absolute():
+            return filepath
+        return (self.config_dir / filepath).resolve()
 
     def validate(self):
 
@@ -184,14 +391,6 @@ class Pipeline:
                     stage.outputs_type_str = []
                 else:
                     stage.outputs_type_str = rtypes
-
-            self.emit(f'-- Stage {i} --')
-            self.emit(f'name   -> {stage.name}')
-            self.emit(f'func   -> {stage.func_name}')
-            self.emit(f'params -> {stage.params}')
-            self.emit(f'input  -> {stage.inputs_type_str}')
-            self.emit(f'output -> {stage.outputs_type_str}')
-            self.emit()
 
         '''
         for i in range(len(self.stages)-1):
@@ -293,17 +492,22 @@ def ast_get_function_by_name(tree, func_name):
 def is_file(fn):
     return "." in fn
 
-def check_files_exist(patterns):
+def check_files_exist(patterns, relative_to):
     missing = []
     for pat in patterns:
+
+        abspath_patt = Path(pat)
+        if not abspath_patt.is_absolute():
+            abspath_patt = (relative_to / pat).resolve()
+
         # glob pattern
-        if "*" in pat:
-            matches = glob.glob(pat)
+        if "*" in str(abspath_patt):
+            matches = glob.glob(str(abspath_patt))
             if not matches:
-                missing.append(pat)
+                missing.append(abspath_patt)
         else:
-            if not Path(pat).exists():
-                missing.append(pat)
+            if not abspath_patt.exists():
+                missing.append(abspath_patt)
 
     return missing
 
@@ -366,3 +570,11 @@ class Emitter:
 
     def error(self, msg: str) -> None:
         self(msg, "error")
+
+def print_run_it_back():
+    print(
+r"""
+█▀█ █ █ █▀▄ ▀█▀ ▀█▀ █▄▄ ▄▀█ █▀▀ █▄▀
+█   █▄█ █ █ ▄█▄  █  █▄█ █▀█ █▄▄ █ █
+"""
+    )

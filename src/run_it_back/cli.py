@@ -1,44 +1,46 @@
+import shlex
+import sys
 import argparse
 from pathlib import Path
 from run_it_back import Pipeline
-import logging
+
+def parse_stage_range(value):
+    if value is None:
+        return 0, None
+
+    if ":" not in value:
+        stage = int(value)
+        return stage - 1, stage
+
+    start, end = value.split(":", maxsplit=1)
+    return int(start) - 1 if start else 0, int(end) if end else None
 
 def main():
+
     parser = argparse.ArgumentParser(
         prog="rib",
         description="run-it-back: reproducible data analysis pipelines",
     )
 
-    parser.add_argument("command", choices=["run", "runfrom"])
     parser.add_argument("file", help="path to .toml pipeline file")
     parser.add_argument("--skip-validation", "-s", action="store_true", help="skip validation of pipeline file and steps (default: False)")
     parser.add_argument("--time-stages", "-t", action="store_true", help="print execution time for each stage")
-    parser.add_argument("--stage", nargs="?", type=int, help="Optional stage index (0-based)")
+    parser.add_argument("--stages", help="1-indexed stage selection: N, N:, :N, or N:M")
 
     args = parser.parse_args()
     pipeline_file = Path(args.file)
 
-    logging.basicConfig(filename=pipeline_file.with_suffix('.log'),
-                        format='%(asctime)s %(levelname)s: %(message)s',
-                        filemode='w')
-    log = logging.getLogger()
-    log.setLevel(logging.INFO)
+    pipeline = Pipeline(pipeline_file, skip_validation=args.skip_validation)
+    command_line = shlex.join(sys.argv)
+    pipeline.emit(f'-> Command: {command_line}')
 
-    pipeline = Pipeline(pipeline_file, log=log)
+    start, end = parse_stage_range(args.stages)
 
-    if not args.skip_validation:
-        pipeline.validate()
-
-    if args.command == "run" and args.stage is None:
-        pipeline.run_all(time_stages=args.time_stages)
-    elif args.command == "run" and args.stage is not None:
-        pipeline.run_stage(args.stage)
-    elif args.command == "runfrom":
-        if args.stage is None:
-            err = "Error: --stage argument is required for 'runfrom' command"
-            log.error(err)
-            raise ValueError(err)
-        pipeline.run_all(start_stage_index=args.stage, time_stages=args.time_stages)
+    pipeline.run(
+        start_stage_index=start,
+        end_stage_index=end,
+        time_stages=args.time_stages,
+    )
 
 if __name__ == "__main__":
     main()

@@ -1,61 +1,175 @@
 # run-it-back
 
-An end-to-end orchestrator for running a data analysis pipeline in a repeatable way. Each pipeline can be represented as a directed acyclic graph (DAG).
+An end-to-end orchestrator for running data analysis pipelines in a repeatable way.
 
-Various checks go into validating the pipeline:
-- String-based typed checking
-- Counting the number of inputs/outputs
-- Checking that the output files are created
+Each run creates a unique output directory, copies the pipeline TOML into that
+directory, writes a small `runtime.json`, and logs pipeline execution. Pipeline
+stages are regular Python functions loaded from file paths in the TOML.
 
-Due to limitations in the AST, there are going to be edge cases that don't work or are not supported.
-
-All functions need to have type annotations for the inputs and outputs. The outputs can be either variables or files. The functions must also be pure functions, meaning they should not have side effects and should always produce the same output for the same input.
-
-Currently a work in progress!
+Currently a work in progress.
 
 ## Command Line Interface
 
-This package provides a CLI for running pipelines which are defined by .toml files. The .toml file contains the definition of the pipeline, including the stages, their inputs and outputs, and the context.
+Run the whole pipeline:
 
 ```bash
-rib run pipeline.toml
+rib pipeline.toml
+```
+
+Run only one stage of the pipeline:
+
+```bash
+rib pipeline.toml --stages 1
+```
+
+Run from a stage to the end:
+
+```bash
+rib pipeline.toml --stages 5:
+```
+
+Run through a stage:
+
+```bash
+rib pipeline.toml --stages :7
+```
+
+Run a stage range:
+
+```bash
+rib pipeline.toml --stages 2:5
+```
+
+Stage numbers are 1-indexed and inclusive in the CLI. Internally they are
+converted to Python slice bounds.
+
+Useful flags:
+
+```bash
+rib pipeline.toml --skip-validation
+rib pipeline.toml --time-stages
 ```
 
 ## Definitions
 
-- context: A dictionary containing global state that is passed to all stages in the pipeline. This is initialized in the beginning and has a special setup in the .toml file.
+- `context`: A dictionary passed to every stage function that accepts a
+  `context` keyword argument.
+- `make_context`: A special initialization stage configured in `[context]`.
+  It runs during `Pipeline` initialization and must return a dictionary. That
+  dictionary is merged into `context`.
+- `pipeline_output_path`: The unique run output directory. This is added to
+  `context` before `make_context` runs.
+- `config_dir`: The directory containing the original pipeline TOML. This is
+  added to `context` so context-building code can resolve input files without
+  depending on the current working directory.
+- `aux_stages`: Optional stages attached to a primary stage. They run after
+  the primary stage and should be used for side-effect-only work such as plots
+  or diagnostics.
 
 ## Schema
 
-``` toml
+```toml
 [pipeline]
 name = "Data Analysis Pipeline"
+pipeline_output_path = "pipeline_output"
+stages_path = "stages"
 
 [context]
-filepath = "stages/make_context.py" # special filepath that is used to initialize the context. File must return a dictionary.
-
+filepath = "stages/make_context.py"
 target = "HR 8799"
 epoch = 2024.1
+DATA_PATH = "../data"
 
 [stages.load_data]
-filepath = "stages/load_data.py" # filepath, function to be executed is assumed to be the same name as the stage if func_name is not specified
-params = { name = "test"} # keyword arguments
-inputs = [] # positional arguments
-outputs = ["data", "const"] # outputs
+filepath = "stages/load_data.py"
+params = { name = "test" }
+inputs = []
+outputs = ["data", "const"]
 
 [stages.calibrate_data]
 filepath = "stages/calibrate_data.py"
-func_name = "alt_calibrate" # use an alternative function
+func_name = "alt_calibrate"
 inputs = ["data", "const"]
 outputs = ["data_calibrated", "number"]
+aux_stages = ["plot_calibration"]
 
 [stages.analyze_data]
 filepath = "stages/analyze_data.py"
-func_name = "analyze_data" # this is unecessary since the function name is the same as the stage name
 inputs = ["data_calibrated", "number"]
-outputs = ["figs/calibrated_data_heatmap.png"] # files are autodetected by the .
+outputs = ["figs/calibrated_data_heatmap.png"]
 
+[aux_stages.plot_calibration]
+filepath = "stages/plot_calibration.py"
+func_name = "plot_calibration"
+inputs = ["results/calibration.pkl"]
 ```
+
+If `func_name` is omitted, the function name is assumed to match the stage name.
+File inputs and outputs are currently detected by the presence of a `.` in the
+configured string.
+
+## Stage Functions
+
+Stages can accept regular positional/keyword inputs and can optionally accept
+`context`:
+
+```python
+def load_data(name: str, context: dict) -> tuple:
+    ...
+```
+
+The `make_context` function should return a dictionary:
+
+```python
+from pathlib import Path
+
+def make_context(context: dict) -> dict:
+    data_path = Path(context["DATA_PATH"])
+    if not data_path.is_absolute():
+        data_path = context["config_dir"] / data_path
+
+    results_path = context["pipeline_output_path"] / "results"
+    results_path.mkdir(exist_ok=True, parents=True)
+
+    return {
+        "DATA_PATH": data_path.resolve(),
+        "RESULTS_PATH": results_path,
+    }
+```
+
+Prefer resolving input paths relative to `context["config_dir"]` and output
+paths relative to `context["pipeline_output_path"]`.
+
+## Reloading Runs
+
+Each run directory contains:
+
+- the copied pipeline TOML
+- `runtime.json`
+- the log file
+- pipeline outputs
+
+For post-processing an existing run:
+
+```python
+from run_it_back import Pipeline
+
+pipeline = Pipeline.load_run("pipeline_output/data_analysis_pipeline_20260508_120000_abcd")
+```
+
+`load_run` reconstructs the pipeline from the run directory without creating a
+new run directory and without logging by default. It re-runs `make_context`, so
+that function should be idempotent.
+
+Pass `echo=True` if you want terminal output while loading:
+
+```python
+pipeline = Pipeline.load_run("pipeline_output/data_analysis_pipeline_20260508_120000_abcd", echo=True)
+```
+
+`runtime.json` is intentionally small. It stores metadata needed to reload a
+run, such as `run_id` and `config_dir`; it is not intended to serialize the full
+runtime `context`.
 
 ## TODO
 
