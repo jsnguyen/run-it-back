@@ -8,6 +8,8 @@ stages are regular Python functions loaded from file paths in the TOML.
 
 Currently a work in progress.
 
+Validation right now only works for file existence, but the plan is to add more robust type checking and better error messages.
+
 ## Command Line Interface
 
 Run the whole pipeline:
