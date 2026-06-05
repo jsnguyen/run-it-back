@@ -49,8 +49,22 @@ Useful flags:
 
 ```bash
 rib pipeline.toml --skip-validation
-rib pipeline.toml --time-stages
 ```
+
+Skips some of the validation aspects of the pipeline, not totally working right now.
+
+```bash
+rib pipeline.toml --time-stages
+rib pipeline-toml -t
+```
+
+Times each of the stages and prints the times.
+
+```bash
+rib pipeline-toml --run-aux N
+```
+
+Runs the auxillary stage for stage N only.
 
 ## Definitions
 

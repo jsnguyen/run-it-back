@@ -26,6 +26,7 @@ def main():
     parser.add_argument("--skip-validation", "-s", action="store_true", help="skip validation of pipeline file and steps (default: False)")
     parser.add_argument("--time-stages", "-t", action="store_true", help="print execution time for each stage")
     parser.add_argument("--stages", help="1-indexed stage selection: N, N:, :N, or N:M")
+    parser.add_argument("--run-aux", type=int, default=None, help="Run only the auxillary part of stage N")
 
     args = parser.parse_args()
     pipeline_file = Path(args.file)
@@ -40,6 +41,7 @@ def main():
         start_stage_index=start,
         end_stage_index=end,
         time_stages=args.time_stages,
+        run_aux_stage_index=args.run_aux,
     )
 
 if __name__ == "__main__":

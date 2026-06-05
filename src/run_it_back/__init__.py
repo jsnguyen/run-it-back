@@ -23,7 +23,7 @@ class RunItBackError(Exception):
     pass
 
 class Stage:
-    def __init__(self, name, config, pipeline_output_path, aux_stages=[]):
+    def __init__(self, name, config, pipeline_output_path, aux_stage_index=None):
 
         self.name = name
 
@@ -54,7 +54,7 @@ class Stage:
 
         self.context = config.get("context", {})
 
-        self.aux_stages = aux_stages
+        self.aux_stage_index = aux_stage_index # if this is not None, then it is an aux stage belonging to stage number corresponding to the index
 
     def run_stage(self):
         if self.func_name is None:
@@ -92,9 +92,6 @@ class Stage:
         missing_files = check_files_exist(self.outputs_files, self.pipeline_output_path)
         if missing_files != []:
             raise RunItBackError(f"Missing output files! {missing_files}")
-
-        for aux_stage in self.aux_stages:
-            aux_stage.run_stage()
 
         return res
 
@@ -204,7 +201,8 @@ class Pipeline:
 
     def parse_stages(self):
         self.stages = []
-        for key in self.config["stages"].keys():
+        self.aux_stages = {}
+        for i, key in enumerate(self.config["stages"].keys()):
             stage_config = self.config["stages"][key]
             stage_config["context"] = self.context # all stages get the context
             stage_config["filepath"] = self.resolve_stage_filepath(stage_config["filepath"])
@@ -214,9 +212,10 @@ class Pipeline:
                 aux_stage_config = self.config["aux_stages"][k]
                 aux_stage_config["context"] = self.context # add context to aux stages as well
                 aux_stage_config["filepath"] = self.resolve_stage_filepath(aux_stage_config["filepath"])
-                aux_stages.append(Stage(k, aux_stage_config, self.pipeline_output_path))
+                aux_stages.append(Stage(k, aux_stage_config, self.pipeline_output_path, aux_stage_index=i))
+            self.aux_stages[i] = aux_stages # stores all the auxillary stages for each stage
 
-            self.stages.append(Stage(key, stage_config, self.pipeline_output_path, aux_stages=aux_stages))
+            self.stages.append(Stage(key, stage_config, self.pipeline_output_path))
 
     def load_runtime_json(self, runtime_json_path):
         with open(runtime_json_path, "r") as f:
@@ -279,7 +278,31 @@ class Pipeline:
                 return stage
         raise ValueError(f"Stage with name '{name}' not found in pipeline!")
 
-    def run(self, start_stage_index=0, end_stage_index=None, time_stages=False):
+    def run(self, start_stage_index=0, end_stage_index=None, time_stages=False, run_aux_stage_index=None):
+
+        # run_aux_stage_index should correspond to the display stage name (not the zero indexed one)
+        if run_aux_stage_index is not None:
+
+            self.emit(f"-> Running auxillary stages for stage {run_aux_stage_index} only...")
+
+            if time_stages:
+                overall_start_time = time.time()
+
+            for aux_stage in self.aux_stages[run_aux_stage_index-1]:
+                if time_stages:
+                    start_time = time.time()
+
+                aux_stage.run_stage()
+
+                if time_stages:
+                    elapsed = time.time() - start_time
+                    self.emit(f'-> Stage {run_aux_stage_index} completed in {format_duration(elapsed)}')
+
+            if time_stages:
+                overall_elapsed = time.time() - overall_start_time
+                self.emit(f'-> Pipeline completed in {format_duration(overall_elapsed)}')
+
+            return
 
         if end_stage_index is not None and end_stage_index <= start_stage_index:
             raise ValueError(f"end_stage_index ({end_stage_index}) must be greater than start_stage_index ({start_stage_index})")
@@ -313,6 +336,10 @@ class Pipeline:
             self.emit()
 
             output = stage.run_stage()
+            if self.aux_stages[i+start_stage_index] != []:
+                for aux_stage in self.aux_stages[i+start_stage_index]:
+                    self.emit(f"-> Running aux stage: {aux_stage.name}")
+                    aux_stage.run_stage()
 
             if stage_index < len(self.stages) - 1:
                 if output is not None:
@@ -349,7 +376,7 @@ inputs
 outputs
     types  : {stage.outputs_type_str}
     files  : {output_files_str}
-aux stages : {[aux_stage.name for aux_stage in stage.aux_stages]}
+aux stages : {[aux_stage.name for aux_stage in self.aux_stages[index]]}
 """)
 
         """
