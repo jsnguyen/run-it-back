@@ -202,6 +202,7 @@ class Pipeline:
     def parse_stages(self):
         self.stages = []
         self.aux_stages = {}
+        self.standalone_stages = []
         for i, key in enumerate(self.config["stages"].keys()):
             stage_config = self.config["stages"][key]
             stage_config["context"] = self.context # all stages get the context
@@ -216,6 +217,12 @@ class Pipeline:
             self.aux_stages[i] = aux_stages # stores all the auxillary stages for each stage
 
             self.stages.append(Stage(key, stage_config, self.pipeline_output_path))
+
+        for i, key in enumerate(self.config["standalone_stages"].keys()):
+            stage_config = self.config["standalone_stages"][key]
+            stage_config["context"] = self.context # all stages get the context
+            stage_config["filepath"] = self.resolve_stage_filepath(stage_config["filepath"])
+            self.standalone_stages.append(Stage(key, stage_config, self.pipeline_output_path))
 
     def load_runtime_json(self, runtime_json_path):
         with open(runtime_json_path, "r") as f:
@@ -278,9 +285,31 @@ class Pipeline:
                 return stage
         raise ValueError(f"Stage with name '{name}' not found in pipeline!")
 
-    def run(self, start_stage_index=0, end_stage_index=None, time_stages=False, run_aux_stage_index=None):
+    def run(self, start_stage_index=0, end_stage_index=None, time_stages=False, run_aux_stage_index=None, run_standalone_stage=None):
 
-        # run_aux_stage_index should correspond to the display stage name (not the zero indexed one)
+        if run_standalone_stage is not None:
+            self.emit(f"-> Running standalone stage named {run_standalone_stage} only...")
+
+            standalone_stage_to_run =  None
+            for standalone_stage in self.standalone_stages:
+                if standalone_stage.name == run_standalone_stage:
+                    standalone_stage_to_run = standalone_stage
+
+            if standalone_stage_to_run is None:
+                raise RunItBackError(f"Standalone stage named \"{run_standalone_stage}\" not found in standalone_stages!")
+
+            if time_stages:
+                start_time = time.time()
+
+            standalone_stage_to_run.run_stage()
+
+            if time_stages:
+                elapsed = time.time() - start_time
+                self.emit(f'-> Standalone stage {run_standalone_stage_index} completed in {format_duration(elapsed)}')
+
+            return
+
+        # run_aux_stage_index should correspond to the display stage index (not the zero indexed one)
         if run_aux_stage_index is not None:
 
             self.emit(f"-> Running auxillary stages for stage {run_aux_stage_index} only...")
