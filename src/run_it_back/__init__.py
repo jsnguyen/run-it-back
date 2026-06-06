@@ -218,11 +218,11 @@ class Pipeline:
 
             self.stages.append(Stage(key, stage_config, self.pipeline_output_path))
 
-        for i, key in enumerate(self.config["standalone_stages"].keys()):
-            stage_config = self.config["standalone_stages"][key]
+        for i in self.config.get("standalone_stages", []):
+            stage_config = self.config["standalone_stages"][i]
             stage_config["context"] = self.context # all stages get the context
             stage_config["filepath"] = self.resolve_stage_filepath(stage_config["filepath"])
-            self.standalone_stages.append(Stage(key, stage_config, self.pipeline_output_path))
+            self.standalone_stages.append(Stage(i, stage_config, self.pipeline_output_path))
 
     def load_runtime_json(self, runtime_json_path):
         with open(runtime_json_path, "r") as f:
