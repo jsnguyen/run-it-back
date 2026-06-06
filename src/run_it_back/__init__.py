@@ -406,6 +406,8 @@ aux stages : {[aux_stage.name for aux_stage in self.aux_stages[index]]}
             tree = ast.parse(contents)
 
             node = ast_get_function_by_name(tree, stage.func_name)
+            if node is None:
+                raise RunItBackError(f"Function {stage.func_name} not found in stage {stage.filepath}!")
 
             n_defaults = len(node.args.defaults)
             for arg in node.args.args[:len(node.args.args)-n_defaults]:
