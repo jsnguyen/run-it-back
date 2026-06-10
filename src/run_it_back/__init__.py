@@ -318,7 +318,7 @@ class Pipeline:
             if time_stages:
                 overall_start_time = time.time()
 
-            for aux_stage in self.aux_stages[run_aux_stage_index-1]:
+            for aux_stage in self.aux_stages[run_aux_stage_index+1]:
                 if time_stages:
                     start_time = time.time()
 
