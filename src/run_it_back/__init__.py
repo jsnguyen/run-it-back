@@ -1,4 +1,5 @@
 __version__ = "0.1.0"
+import warnings
 
 import ast
 import sys
@@ -91,7 +92,7 @@ class Stage:
 
         missing_files = check_files_exist(self.outputs_files, self.pipeline_output_path)
         if missing_files != []:
-            raise RunItBackError(f"Missing output files! {missing_files}")
+            warnings.warn(f"Missing output files! {missing_files}")
 
         return res
 
