@@ -306,7 +306,7 @@ class Pipeline:
 
             if time_stages:
                 elapsed = time.time() - start_time
-                self.emit(f'-> Standalone stage {run_standalone_stage_index} completed in {format_duration(elapsed)}')
+                self.emit(f'-> Standalone stage {run_standalone_stage} completed in {format_duration(elapsed)}')
 
             return
 
