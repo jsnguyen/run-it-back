@@ -66,6 +66,10 @@ rib pipeline-toml --run-aux N
 
 Runs the auxillary stage for stage N only.
 
+## Logging
+
+Each pipeline writes a log named after its TOML file in the pipeline output directory. RIB messages and stage stdout are written to both the terminal and the log. Stage stderr remains terminal-only so progress displays such as `tqdm` do not fill the log. If pipeline initialization or execution raises an exception, RIB writes the full traceback as the final log entry before re-raising it.
+
 ## Definitions
 
 - `context`: A dictionary passed to every stage function that accepts a

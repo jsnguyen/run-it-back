@@ -4,6 +4,7 @@ import warnings
 import ast
 import sys
 import time
+from contextlib import redirect_stdout
 from pathlib import Path
 import importlib.util
 import inspect
@@ -137,17 +138,21 @@ class Pipeline:
         self.write_runtime_json() # all runtime info needed is initialized up to here
 
         self.emit = self.init_logger()
-        self.emit(f"-> Initializing {self.pipeline_parameters.get("name")}")
-        self.emit(f"-> Pipeline output path: {self.pipeline_output_path}")
+        try:
+            self.emit(f"-> Initializing {self.pipeline_parameters.get("name")}")
+            self.emit(f"-> Pipeline output path: {self.pipeline_output_path}")
 
-        self.configure_stages_path()
+            self.configure_stages_path()
 
-        self.make_context_stage()
+            self.make_context_stage()
 
-        self.parse_stages()
+            self.parse_stages()
 
-        if not skip_validation:
-            self.validate()
+            if not skip_validation:
+                self.validate()
+        except BaseException:
+            self.emit.exception("-> Pipeline initialization failed")
+            raise
 
     def generate_run_id(self):
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(2) # add run id for better tracking of different runs, can be used in context if desired
@@ -197,7 +202,7 @@ class Pipeline:
         config["context"] = self.context
 
         make_context_stage = Stage("make_context", config, self.pipeline_output_path)
-        object_context = make_context_stage.run_stage()
+        object_context = self._execute_stage(make_context_stage)
         self.context.update(object_context)
 
     def parse_stages(self):
@@ -273,7 +278,7 @@ class Pipeline:
             self.validate()
 
     def init_logger(self):
-        logging.basicConfig(filename=self.pipeline_output_path / self.filepath.with_suffix('.log'),
+        logging.basicConfig(filename=self.pipeline_output_path / self.filepath.with_suffix('.log').name,
                             format='%(asctime)s %(levelname)s: %(message)s',
                             filemode='w')
         log = logging.getLogger()
@@ -286,7 +291,25 @@ class Pipeline:
                 return stage
         raise ValueError(f"Stage with name '{name}' not found in pipeline!")
 
+    def _execute_stage(self, stage):
+        if self.emit.log is None:
+            return stage.run_stage()
+
+        stdout_tee = StdoutTee(sys.stdout, self.emit.log)
+        try:
+            with redirect_stdout(stdout_tee):
+                return stage.run_stage()
+        finally:
+            stdout_tee.flush()
+
     def run(self, start_stage_index=0, end_stage_index=None, time_stages=False, run_aux_stage_index=None, run_standalone_stage=None):
+        try:
+            return self._run(start_stage_index=start_stage_index, end_stage_index=end_stage_index, time_stages=time_stages, run_aux_stage_index=run_aux_stage_index, run_standalone_stage=run_standalone_stage)
+        except BaseException:
+            self.emit.exception("-> Pipeline failed")
+            raise
+
+    def _run(self, start_stage_index=0, end_stage_index=None, time_stages=False, run_aux_stage_index=None, run_standalone_stage=None):
 
         if run_standalone_stage is not None:
             self.emit(f"-> Running standalone stage named {run_standalone_stage} only...")
@@ -302,7 +325,7 @@ class Pipeline:
             if time_stages:
                 start_time = time.time()
 
-            standalone_stage_to_run.run_stage()
+            self._execute_stage(standalone_stage_to_run)
 
             if time_stages:
                 elapsed = time.time() - start_time
@@ -322,7 +345,7 @@ class Pipeline:
                 if time_stages:
                     start_time = time.time()
 
-                aux_stage.run_stage()
+                self._execute_stage(aux_stage)
 
                 if time_stages:
                     elapsed = time.time() - start_time
@@ -365,11 +388,11 @@ class Pipeline:
             self.emit("="*64)
             self.emit()
 
-            output = stage.run_stage()
+            output = self._execute_stage(stage)
             if self.aux_stages[i+start_stage_index] != []:
                 for aux_stage in self.aux_stages[i+start_stage_index]:
                     self.emit(f"-> Running aux stage: {aux_stage.name}")
-                    aux_stage.run_stage()
+                    self._execute_stage(aux_stage)
 
             if stage_index < len(self.stages) - 1:
                 if output is not None:
@@ -390,7 +413,11 @@ class Pipeline:
 
     # this wont always work, only works if stages are independent of one another
     def run_stage(self, index):
-        return self.stages[index].run_stage()
+        try:
+            return self._execute_stage(self.stages[index])
+        except BaseException:
+            self.emit.exception(f"-> Stage {self.stages[index].name} failed")
+            raise
 
     def print_stage(self, stage, index):
         input_files_str  = "\n            ".join(stage.inputs_files)
@@ -629,6 +656,34 @@ class Emitter:
 
     def error(self, msg: str) -> None:
         self(msg, "error")
+
+    def exception(self, msg: str) -> None:
+        self(msg, "exception")
+
+class StdoutTee:
+    def __init__(self, stream, log):
+        self.stream = stream
+        self.log = log
+        self.buffer = ""
+
+    def write(self, text):
+        written = self.stream.write(text)
+        self.stream.flush()
+        self.buffer += text
+        lines = self.buffer.split("\n")
+        self.buffer = lines.pop()
+        for line in lines:
+            self.log.info(line.rstrip("\r"))
+        return written
+
+    def flush(self):
+        self.stream.flush()
+        if self.buffer:
+            self.log.info(self.buffer.rstrip("\r"))
+            self.buffer = ""
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
 
 def print_run_it_back():
     print(
