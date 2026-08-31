@@ -1,3 +1,4 @@
+import json
 import io
 import sys
 from contextlib import redirect_stderr, redirect_stdout
@@ -6,11 +7,32 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from run_it_back import Emitter, Pipeline, __version__
+from run_it_back import Emitter, Pipeline, __version__, get_git_metadata
 
 
 def test_version():
     assert __version__ == "0.1.0"
+
+
+def test_git_metadata_records_commit_and_dirty_state():
+    with patch("run_it_back.subprocess.run") as run:
+        run.side_effect = [MagicMock(stdout="abc123\n"), MagicMock(stdout=" M file.py\n")]
+        assert get_git_metadata("/project") == ("abc123", True)
+
+
+def test_runtime_json_includes_git_metadata(tmp_path):
+    pipeline = Pipeline.__new__(Pipeline)
+    pipeline.run_id = "test_run"
+    pipeline.config_dir = Path("/project")
+    pipeline.pipeline_output_path = tmp_path
+    pipeline.git_commit = "abc123"
+    pipeline.git_dirty = True
+
+    pipeline.write_runtime_json()
+
+    runtime = json.loads((tmp_path / "runtime.json").read_text())
+    assert runtime["git_commit"] == "abc123"
+    assert runtime["git_dirty"] is True
 
 
 def test_log_file_is_created_in_pipeline_output_directory(tmp_path):

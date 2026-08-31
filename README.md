@@ -202,8 +202,9 @@ pipeline = Pipeline.load_run("pipeline_output/data_analysis_pipeline_20260508_12
 ```
 
 `runtime.json` is intentionally small. It stores metadata needed to reload a
-run, such as `run_id` and `config_dir`; it is not intended to serialize the full
-runtime `context`.
+run, including `run_id`, `config_dir`, the Git commit, and whether the checkout
+had uncommitted changes. It is not intended to serialize the full runtime
+`context`.
 
 ## TODO
 

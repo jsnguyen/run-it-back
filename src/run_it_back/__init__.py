@@ -17,6 +17,7 @@ import secrets
 from shutil import copy2
 import logging
 import json
+import subprocess
 
 SAVE_FUNC_NAMES = ("save", "savefig", "to_csv", "to_parquet", "to_hdf",
                    "to_excel", "to_json", "to_pickle", "to_feather",
@@ -25,6 +26,15 @@ SAVE_FUNC_NAMES = ("save", "savefig", "to_csv", "to_parquet", "to_hdf",
 
 class RunItBackError(Exception):
     pass
+
+def get_git_metadata(repo_path):
+    kwargs = {"check": True, "capture_output": True, "text": True}
+    try:
+        commit = subprocess.run(["git", "-C", str(repo_path), "rev-parse", "HEAD"], **kwargs).stdout.strip()
+        status = subprocess.run(["git", "-C", str(repo_path), "status", "--porcelain"], **kwargs).stdout
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None, None
+    return commit, bool(status.strip())
 
 class Stage:
     def __init__(self, name, config, pipeline_output_path, aux_stage_index=None):
@@ -134,6 +144,7 @@ class Pipeline:
         self.pipeline_parameters = self.config["pipeline"] # these are the pipeline specific parameters
         self.config_dir = self.filepath.parent.resolve()
         self.context["config_dir"] = self.config_dir
+        self.git_commit, self.git_dirty = get_git_metadata(self.config_dir)
 
         self.generate_run_id()
 
@@ -146,6 +157,11 @@ class Pipeline:
         try:
             self.emit(f"-> Initializing {self.pipeline_parameters.get("name")}")
             self.emit(f"-> Pipeline output path: {self.pipeline_output_path}")
+            if self.git_commit is None:
+                self.emit("-> Git commit: unavailable")
+            else:
+                git_status = "dirty" if self.git_dirty else "clean"
+                self.emit(f"-> Git commit: {self.git_commit} ({git_status})")
 
             self.configure_stages_path()
 
@@ -190,6 +206,8 @@ class Pipeline:
         runtime = {
             "run_id":     self.run_id,
             "config_dir": str(self.config_dir),
+            "git_commit": self.git_commit,
+            "git_dirty":  self.git_dirty,
         }
 
         with open(self.pipeline_output_path / "runtime.json", "w") as f:
@@ -271,6 +289,8 @@ class Pipeline:
         self.context["config_dir"] = self.config_dir
 
         self.run_id                 = runtime["run_id"]
+        self.git_commit             = runtime.get("git_commit")
+        self.git_dirty              = runtime.get("git_dirty")
 
         # this replaces self.configure_pipeline_output() since we need the run_id to make the output path
         self.pipeline_output_prefix = self.pipeline_parameters.get("pipeline_output_prefix", self.pipeline_parameters.get("name").lower().replace(" ", "_"))
