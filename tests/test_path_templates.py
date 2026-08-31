@@ -1,4 +1,6 @@
+import json
 import sys
+from shutil import copy2, copytree
 
 import pytest
 
@@ -99,5 +101,33 @@ def test_pipeline_and_loaded_run_expand_templates_after_make_context(tmp_path):
 
         assert pipeline.stages[0].inputs_files == [f"{data_path}/*.fits"]
         assert loaded.stages[0].inputs_files == [f"{data_path}/*.fits"]
+
+        relocated_root = tmp_path / "relocated"
+        relocated_stages_path = relocated_root / "stages"
+        relocated_data_path = relocated_root / "external"
+        relocated_stages_path.mkdir(parents=True)
+        relocated_data_path.mkdir()
+        (relocated_data_path / "input.fits").touch()
+        copy2(tmp_path / "path_helper.py", relocated_root / "path_helper.py")
+        copy2(stages_path / "make_context.py", relocated_stages_path / "make_context.py")
+        copy2(stages_path / "fit.py", relocated_stages_path / "fit.py")
+
+        relocated_run_path = relocated_root / "runs" / pipeline.pipeline_output_path.name
+        copytree(pipeline.pipeline_output_path, relocated_run_path)
+
+        runtime_path = relocated_run_path / "runtime.json"
+        runtime = json.loads(runtime_path.read_text())
+        runtime["config_dir"] = str(tmp_path / "missing_remote_project")
+        runtime_path.write_text(json.dumps(runtime, indent=2))
+        sys.modules.pop("path_helper", None)
+
+        relocated = Pipeline.load_run(relocated_run_path, config_dir=relocated_root)
+
+        assert relocated.config_dir == relocated_root.resolve()
+        assert relocated.pipeline_output_path == relocated_run_path.resolve()
+        assert relocated.stages[0].filepath == relocated_stages_path / "fit.py"
+        assert relocated.stages[0].inputs_files == [f"{relocated_data_path}/*.fits"]
     finally:
-        sys.path[:] = [entry for entry in sys.path if entry not in {str(tmp_path), str(stages_path)}]
+        sys.modules.pop("path_helper", None)
+        excluded_paths = {str(tmp_path), str(stages_path), str(tmp_path / "relocated"), str(tmp_path / "relocated" / "stages")}
+        sys.path[:] = [entry for entry in sys.path if entry not in excluded_paths]

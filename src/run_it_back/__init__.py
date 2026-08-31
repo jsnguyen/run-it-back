@@ -247,12 +247,12 @@ class Pipeline:
         return runtime
 
     @classmethod
-    def load_run(cls, run_path, skip_validation=True, echo=False):
+    def load_run(cls, run_path, skip_validation=True, echo=False, config_dir=None):
         obj = cls.__new__(cls)  # allocate object without calling __init__
-        obj._load_run(run_path, skip_validation=skip_validation, echo=echo)
+        obj._load_run(run_path, skip_validation=skip_validation, echo=echo, config_dir=config_dir)
         return obj
 
-    def _load_run(self, run_path, skip_validation=True, echo=False):
+    def _load_run(self, run_path, skip_validation=True, echo=False, config_dir=None):
         run_path = Path(run_path).resolve()
 
         runtime = self.load_runtime_json(run_path / "runtime.json")
@@ -267,7 +267,7 @@ class Pipeline:
 
         self.context               = self.config["context"]
         self.pipeline_parameters   = self.config["pipeline"]
-        self.config_dir            = Path(runtime["config_dir"])
+        self.config_dir            = Path(runtime["config_dir"]) if config_dir is None else Path(config_dir).expanduser().resolve()
         self.context["config_dir"] = self.config_dir
 
         self.run_id                 = runtime["run_id"]

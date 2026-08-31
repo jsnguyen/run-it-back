@@ -194,6 +194,13 @@ Pass `echo=True` if you want terminal output while loading:
 pipeline = Pipeline.load_run("pipeline_output/data_analysis_pipeline_20260508_120000_abcd", echo=True)
 ```
 
+If the run was moved from another machine, pass the local directory containing
+the pipeline TOML and stage files:
+
+```python
+pipeline = Pipeline.load_run("pipeline_output/data_analysis_pipeline_20260508_120000_abcd", config_dir="/local/path/to/project")
+```
+
 `runtime.json` is intentionally small. It stores metadata needed to reload a
 run, such as `run_id` and `config_dir`; it is not intended to serialize the full
 runtime `context`.
