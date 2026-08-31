@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from run_it_back import Pipeline, RunItBackError, Stage
+from run_it_back import Pipeline, Stage
 
 
 def make_pipeline(tmp_path, stages):
@@ -59,17 +59,17 @@ def test_reuse_outputs_links_prior_stage_outputs_and_records_metadata(tmp_path):
     assert runtime["reused_file_count"] == 3
 
 
-def test_reuse_outputs_fails_before_linking_when_source_output_is_missing(tmp_path):
+def test_reuse_outputs_warns_and_continues_when_source_output_is_missing(tmp_path):
     source_run = make_source_run(tmp_path)
     pipeline = make_pipeline(tmp_path, [
         ("one", ["results/stage_one.pkl"]),
         ("missing", ["results/missing.pkl"]),
     ])
 
-    with pytest.raises(RunItBackError, match="results/missing.pkl"):
-        pipeline.reuse_outputs(source_run, through_stage_index=2)
+    pipeline.reuse_outputs(source_run, through_stage_index=2)
 
-    assert not (pipeline.pipeline_output_path / "results" / "stage_one.pkl").exists()
+    assert (pipeline.pipeline_output_path / "results" / "stage_one.pkl").exists()
+    pipeline.emit.warning.assert_called_once_with("-> Source run is missing output results/missing.pkl from stage missing; skipping")
 
 
 def test_reuse_outputs_copies_when_hard_links_are_unavailable(tmp_path):

@@ -51,8 +51,10 @@ rib pipeline.toml --from-run pipeline_output/base_run --stages 5:
 `--from-run` reuses the declared relative outputs from stages 1--4 before
 running stage 5. Files are hard linked when possible and copied otherwise. The
 new run records the source run, source Git revision, reuse boundary, and reused
-file count in `runtime.json`. This option is an explicit assertion that the
-reused upstream products are compatible with the current pipeline settings.
+file count in `runtime.json`. Missing source outputs produce warnings and are
+skipped; the selected stages still enforce their required inputs normally. This
+option is an explicit assertion that the reused upstream products are compatible
+with the current pipeline settings.
 
 Run through a stage:
 

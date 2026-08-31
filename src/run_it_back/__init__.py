@@ -288,7 +288,8 @@ class Pipeline:
 
                 matches = [Path(filepath) for filepath in glob.glob(str(source_run / pattern_path)) if Path(filepath).is_file()]
                 if not matches:
-                    raise RunItBackError(f"Source run is missing output {pattern} from stage {stage.name}")
+                    self.emit.warning(f"-> Source run is missing output {pattern} from stage {stage.name}; skipping")
+                    continue
 
                 for source_filepath in matches:
                     relative_path = source_filepath.relative_to(source_run)
