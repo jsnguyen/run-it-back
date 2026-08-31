@@ -128,6 +128,13 @@ If `func_name` is omitted, the function name is assumed to match the stage name.
 File inputs and outputs are currently detected by the presence of a `.` in the
 configured string.
 
+Stage `inputs` and `outputs` may use Python template expressions such as
+`"${DATA_PATH}/${program}/*.fits"`. RIB expands these expressions from the
+final context after `make_context` runs; this is a RIB feature, not native TOML
+interpolation. Context values may be strings or `Path` objects. Existing bare
+relative paths such as `"results/output.pkl"` remain relative to the pipeline
+run directory.
+
 ## Stage Functions
 
 Stages can accept regular positional/keyword inputs and can optionally accept

@@ -2,10 +2,12 @@ __version__ = "0.1.0"
 import warnings
 
 import ast
+import os
 import sys
 import time
 from contextlib import redirect_stdout
 from pathlib import Path
+from string import Template
 import importlib.util
 import inspect
 import tomllib
@@ -45,16 +47,19 @@ class Stage:
         self.inputs = None
         self.outputs = None
 
-        self.inputs_config = config.get("inputs", [])
-        self.outputs_config = config.get("outputs", [])
+        self.inputs_config_raw = config.get("inputs", [])
+        self.outputs_config_raw = config.get("outputs", [])
+
+        self.context = config.get("context", {})
+
+        self.inputs_config = expand_file_templates(self.inputs_config_raw, self.context, self.name, "input")
+        self.outputs_config = expand_file_templates(self.outputs_config_raw, self.context, self.name, "output")
 
         self.inputs_files = [el for el in self.inputs_config if is_file(el)]
         self.outputs_files = [el for el in self.outputs_config if is_file(el)]
 
         self.inputs_type_str = []
         self.outputs_type_str = []
-
-        self.context = config.get("context", {})
 
         self.aux_stage_index = aux_stage_index # if this is not None, then it is an aux stage belonging to stage number corresponding to the index
 
@@ -191,9 +196,15 @@ class Pipeline:
             json.dump(runtime, f, indent=2)
 
     def configure_stages_path(self):
+        config_dir = str(self.config_dir)
+        if config_dir not in sys.path:
+            sys.path.insert(0, config_dir)
+
         stages_path = self.pipeline_parameters.get("stages_path")
         if stages_path:
-            sys.path.insert(0, str((self.config_dir / stages_path).resolve())) # so we can reference/import functions within stages within other stages
+            stages_path = str((self.config_dir / stages_path).resolve())
+            if stages_path not in sys.path:
+                sys.path.insert(0, stages_path) # so we can reference/import functions within stages within other stages
 
     def make_context_stage(self):
         # this is kind of hacky, but this is correct for the context stage
@@ -578,13 +589,25 @@ def ast_get_function_by_name(tree, func_name):
 def is_file(fn):
     return "." in fn
 
+def expand_file_templates(patterns, context, stage_name, pattern_type):
+    expanded = []
+    for pattern in patterns:
+        try:
+            expanded.append(Template(pattern).substitute(context))
+        except KeyError as error:
+            key = error.args[0]
+            raise RunItBackError(f"Missing context key '{key}' while expanding {pattern_type} pattern '{pattern}' for stage '{stage_name}'") from error
+        except ValueError as error:
+            raise RunItBackError(f"Invalid template in {pattern_type} pattern '{pattern}' for stage '{stage_name}': {error}") from error
+    return expanded
+
 def check_files_exist(patterns, relative_to):
     missing = []
     for pat in patterns:
 
-        abspath_patt = Path(pat)
+        abspath_patt = Path(os.path.expandvars(os.path.expanduser(str(pat))))
         if not abspath_patt.is_absolute():
-            abspath_patt = (relative_to / pat).resolve()
+            abspath_patt = (relative_to / abspath_patt).resolve()
 
         # glob pattern
         if "*" in str(abspath_patt):
