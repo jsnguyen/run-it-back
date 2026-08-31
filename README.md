@@ -30,6 +30,30 @@ Run from a stage to the end:
 rib pipeline.toml --stages 5:
 ```
 
+Override an existing TOML value for one run:
+
+```bash
+rib pipeline.toml --override pipeline.use_unique_path=false
+```
+
+Values use TOML syntax, and `--override` may be repeated. Quote the whole
+expression when the value contains spaces or is a string, for example
+`--override 'context.program="GTO1200"'`. Applied overrides are recorded in
+`runtime.json` and restored by `Pipeline.load_run()`.
+
+Create a unique run that reuses outputs from stages before the selected start
+stage:
+
+```bash
+rib pipeline.toml --from-run pipeline_output/base_run --stages 5:
+```
+
+`--from-run` reuses the declared relative outputs from stages 1--4 before
+running stage 5. Files are hard linked when possible and copied otherwise. The
+new run records the source run, source Git revision, reuse boundary, and reused
+file count in `runtime.json`. This option is an explicit assertion that the
+reused upstream products are compatible with the current pipeline settings.
+
 Run through a stage:
 
 ```bash

@@ -27,6 +27,33 @@ SAVE_FUNC_NAMES = ("save", "savefig", "to_csv", "to_parquet", "to_hdf",
 class RunItBackError(Exception):
     pass
 
+def apply_config_overrides(config, overrides):
+    applied = {}
+    for expression in overrides or []:
+        key, separator, raw_value = expression.partition("=")
+        key = key.strip()
+        raw_value = raw_value.strip()
+        if not separator or not key or not raw_value:
+            raise RunItBackError(f"Invalid config override '{expression}'; expected KEY=VALUE")
+
+        try:
+            value = tomllib.loads(f"value = {raw_value}")["value"]
+        except tomllib.TOMLDecodeError as error:
+            raise RunItBackError(f"Invalid TOML value in config override '{expression}': {error}") from error
+
+        path = key.split(".")
+        target = config
+        for part in path[:-1]:
+            if part not in target or not isinstance(target[part], dict):
+                raise RunItBackError(f"Unknown config override key '{key}'")
+            target = target[part]
+        if path[-1] not in target:
+            raise RunItBackError(f"Unknown config override key '{key}'")
+
+        target[path[-1]] = value
+        applied[key] = value
+    return applied
+
 def get_git_metadata(repo_path):
     kwargs = {"check": True, "capture_output": True, "text": True}
     try:
@@ -129,7 +156,7 @@ class Pipeline:
 
     '''
 
-    def __init__(self, filepath, skip_validation=False):
+    def __init__(self, filepath, skip_validation=False, overrides=None):
         print_run_it_back()
         print("="*64)
         print()
@@ -137,6 +164,8 @@ class Pipeline:
         self.filepath = Path(filepath).resolve()
         with open(self.filepath, "rb") as f:
             self.config = tomllib.load(f)
+        self.config_overrides = list(overrides or [])
+        self.config_override_values = apply_config_overrides(self.config, self.config_overrides)
 
         # context is the global state that gets passed to all stages
         # use the object context stage to initialize python objects
@@ -145,6 +174,13 @@ class Pipeline:
         self.config_dir = self.filepath.parent.resolve()
         self.context["config_dir"] = self.config_dir
         self.git_commit, self.git_dirty = get_git_metadata(self.config_dir)
+        self.source_run = None
+        self.source_run_id = None
+        self.source_git_commit = None
+        self.source_git_dirty = None
+        self.source_config_overrides = None
+        self.reused_through_stage = None
+        self.reused_file_count = None
 
         self.generate_run_id()
 
@@ -162,6 +198,8 @@ class Pipeline:
             else:
                 git_status = "dirty" if self.git_dirty else "clean"
                 self.emit(f"-> Git commit: {self.git_commit} ({git_status})")
+            for key, value in self.config_override_values.items():
+                self.emit(f"-> Config override: {key} = {value!r}")
 
             self.configure_stages_path()
 
@@ -210,8 +248,80 @@ class Pipeline:
             "git_dirty":  self.git_dirty,
         }
 
+        if getattr(self, "config_overrides", []):
+            runtime["config_overrides"] = self.config_overrides
+
+        if getattr(self, "source_run", None) is not None:
+            runtime.update({
+                "source_run": self.source_run,
+                "source_run_id": self.source_run_id,
+                "source_git_commit": self.source_git_commit,
+                "source_git_dirty": self.source_git_dirty,
+                "source_config_overrides": self.source_config_overrides,
+                "reused_through_stage": self.reused_through_stage,
+                "reused_file_count": self.reused_file_count,
+            })
+
         with open(self.pipeline_output_path / "runtime.json", "w") as f:
             json.dump(runtime, f, indent=2)
+
+    def reuse_outputs(self, source_run, through_stage_index):
+        source_run = Path(source_run).expanduser().resolve()
+        if not source_run.is_dir():
+            raise RunItBackError(f"Source run not found: {source_run}")
+        if source_run == self.pipeline_output_path:
+            raise RunItBackError("Source run and new run cannot be the same directory")
+        if through_stage_index <= 0 or through_stage_index > len(self.stages):
+            raise RunItBackError(f"Invalid reuse boundary: stage {through_stage_index}")
+
+        source_runtime_path = source_run / "runtime.json"
+        if not source_runtime_path.is_file():
+            raise RunItBackError(f"Source run is missing runtime.json: {source_run}")
+        source_runtime = self.load_runtime_json(source_runtime_path)
+
+        files_to_reuse = {}
+        for stage in self.stages[:through_stage_index]:
+            for pattern in stage.outputs_files:
+                pattern_path = Path(os.path.expandvars(pattern)).expanduser()
+                if pattern_path.is_absolute():
+                    continue
+
+                matches = [Path(filepath) for filepath in glob.glob(str(source_run / pattern_path)) if Path(filepath).is_file()]
+                if not matches:
+                    raise RunItBackError(f"Source run is missing output {pattern} from stage {stage.name}")
+
+                for source_filepath in matches:
+                    relative_path = source_filepath.relative_to(source_run)
+                    files_to_reuse[relative_path] = source_filepath
+
+        for relative_path in files_to_reuse:
+            destination = self.pipeline_output_path / relative_path
+            if destination.exists():
+                raise RunItBackError(f"Reused output already exists in new run: {destination}")
+
+        hardlinked_count = 0
+        copied_count = 0
+        for relative_path, source_filepath in files_to_reuse.items():
+            destination = self.pipeline_output_path / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(source_filepath, destination)
+                hardlinked_count += 1
+            except OSError:
+                copy2(source_filepath, destination)
+                copied_count += 1
+
+        self.source_run = source_run.name
+        self.source_run_id = source_runtime.get("run_id")
+        self.source_git_commit = source_runtime.get("git_commit")
+        self.source_git_dirty = source_runtime.get("git_dirty")
+        self.source_config_overrides = source_runtime.get("config_overrides", [])
+        self.reused_through_stage = through_stage_index
+        self.reused_file_count = len(files_to_reuse)
+        self.write_runtime_json()
+
+        self.emit(f"-> Reused outputs through stage {through_stage_index} from: {source_run}")
+        self.emit(f"-> Reused {len(files_to_reuse)} files ({hardlinked_count} hard linked, {copied_count} copied)")
 
     def configure_stages_path(self):
         config_dir = str(self.config_dir)
@@ -282,6 +392,8 @@ class Pipeline:
         self.filepath = tomls[0]
         with open(self.filepath, "rb") as f:
             self.config = tomllib.load(f)
+        self.config_overrides = runtime.get("config_overrides", [])
+        self.config_override_values = apply_config_overrides(self.config, self.config_overrides)
 
         self.context               = self.config["context"]
         self.pipeline_parameters   = self.config["pipeline"]
@@ -291,6 +403,13 @@ class Pipeline:
         self.run_id                 = runtime["run_id"]
         self.git_commit             = runtime.get("git_commit")
         self.git_dirty              = runtime.get("git_dirty")
+        self.source_run             = runtime.get("source_run")
+        self.source_run_id          = runtime.get("source_run_id")
+        self.source_git_commit      = runtime.get("source_git_commit")
+        self.source_git_dirty       = runtime.get("source_git_dirty")
+        self.source_config_overrides = runtime.get("source_config_overrides")
+        self.reused_through_stage   = runtime.get("reused_through_stage")
+        self.reused_file_count      = runtime.get("reused_file_count")
 
         # this replaces self.configure_pipeline_output() since we need the run_id to make the output path
         self.pipeline_output_prefix = self.pipeline_parameters.get("pipeline_output_prefix", self.pipeline_parameters.get("name").lower().replace(" ", "_"))
